@@ -4,5 +4,8 @@
 *.mp3
 *.wav
 *.mp4
+*.pipeline.json*
+__pycache__/
+*.pyc
 /cut/*.*
 /.vscode/*

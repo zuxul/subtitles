@@ -1,0 +1,121 @@
+{
+  "work_dir": ".",
+  "state_file": "{stem}.pipeline.json",
+  "variables": {
+    "python": "python3"
+  },
+  "steps": [
+    {
+      "name": "audio",
+      "description": "Извлечь mono WAV 16 kHz",
+      "program": "ffmpeg",
+      "inputs": {
+        "video": "{video}"
+      },
+      "outputs": {
+        "wav": "{work_dir}/{stem}.wav"
+      },
+      "args": [
+        "-y",
+        "-i", "{inputs.video}",
+        "-vn",
+        "-acodec", "pcm_s16le",
+        "-ar", "16000",
+        "-ac", "1",
+        "{outputs.wav}"
+      ]
+    },
+    {
+      "name": "whisper",
+      "description": "Распознать греческую речь",
+      "program": "/Users/ivansh/projects/whisper.cpp/build-release/bin/whisper-cli",
+      "inputs": {
+        "wav": "@audio.wav"
+      },
+      "outputs": {
+        "srt": "{work_dir}/{stem}.srt"
+      },
+      "args": [
+        "-m", "/Users/ivansh/projects/models/ggml-large-v3.bin",
+        "-f", "{inputs.wav}",
+        "-l", "el",
+        "-osrt",
+        "-of", "{work_dir}/{stem}",
+        "-pp",
+        "-t", "1",
+        "--vad",
+        "--vad-threshold", "0.45",
+        "-vm", "/Users/ivansh/projects/models/ggml-silero-v5.1.2.bin",
+        "-bs", "5"
+      ]
+    },
+    {
+      "name": "translate",
+      "description": "Перевести SRT на русский",
+      "program": "{vars.python}",
+      "inputs": {
+        "srt": "@whisper.srt"
+      },
+      "outputs": {
+        "ru_srt": "{work_dir}/{stem}_ru.srt"
+      },
+      "args": [
+        "{config_dir}/translate.py",
+        "{inputs.srt}",
+        "el",
+        "ru"
+      ]
+    },
+    {
+      "name": "ass",
+      "description": "Собрать двуязычный ASS",
+      "inputs": {
+        "video": "{video}",
+        "srt": "@whisper.srt",
+        "ru_srt": "@translate.ru_srt"
+      },
+      "outputs": {
+        "ass": "{work_dir}/{stem}.ass"
+      },
+      "commands": [
+        {
+          "program": "ffprobe",
+          "args": [
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=display_aspect_ratio",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            "{inputs.video}"
+          ],
+          "capture": "aspect_ratio",
+          "default": "16:9",
+          "validate": "^[0-9]+:[0-9]+$"
+        },
+        {
+          "program": "{vars.python}",
+          "args": [
+            "{config_dir}/convert_to_ass.py",
+            "{inputs.srt}",
+            "{vars.aspect_ratio}"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "publish",
+      "description": "Скопировать ASS в папку видео",
+      "program": "cp",
+      "inputs": {
+        "ass": "@ass.ass"
+      },
+      "outputs": {
+        "published": "{video_dir}/{stem}.ass"
+      },
+      "args": [
+        "-f",
+        "{inputs.ass}",
+        "{outputs.published}"
+      ]
+    }
+  ]
+}
