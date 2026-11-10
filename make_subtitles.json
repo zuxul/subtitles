@@ -53,6 +53,7 @@
       "name": "translate",
       "description": "Перевести SRT на русский",
       "program": "{vars.python}",
+      "cwd": "{script_dir}",
       "inputs": {
         "srt": "@whisper.srt"
       },
@@ -60,7 +61,7 @@
         "ru_srt": "{work_dir}/{stem}_ru.srt"
       },
       "args": [
-        "{config_dir}/translate.py",
+        "{script_dir}/translate.py",
         "{inputs.srt}",
         "el",
         "ru"
@@ -94,7 +95,7 @@
         {
           "program": "{vars.python}",
           "args": [
-            "{config_dir}/convert_to_ass.py",
+            "{script_dir}/convert_to_ass.py",
             "{inputs.srt}",
             "{vars.aspect_ratio}"
           ]

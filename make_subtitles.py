@@ -61,6 +61,7 @@ class Step:
     variables: Dict[str, Any]
     commands: List[CommandDef]
     stop_after: bool = False
+    cwd_template: Optional[str] = None
 
 
 @dataclass
@@ -288,6 +289,10 @@ def load_config(path: Path) -> Config:
         if not isinstance(stop_after, bool):
             raise PipelineError(f"шаг '{name}': 'stop_after' должен быть true или false")
 
+        cwd_template = step_raw.get("cwd")
+        if cwd_template is not None and (not isinstance(cwd_template, str) or not cwd_template):
+            raise PipelineError(f"шаг '{name}': 'cwd' должен быть непустой строкой")
+
         inputs = _parse_name_map(step_raw.get("inputs"), "inputs", name)
         outputs = _parse_name_map(step_raw.get("outputs"), "outputs", name)
         step_variables = _parse_variables(step_raw.get("variables"), f"шаг '{name}'")
@@ -329,6 +334,7 @@ def load_config(path: Path) -> Config:
                 variables=step_variables,
                 commands=commands,
                 stop_after=stop_after,
+                cwd_template=cwd_template,
             )
         )
 
@@ -342,6 +348,7 @@ def load_config(path: Path) -> Config:
 
 
 def make_runtime(config: Config, video: Path) -> Runtime:
+    script_dir = Path(__file__).resolve().parent
     builtins = {
         "video": str(video),
         "video_dir": str(video.parent),
@@ -349,6 +356,7 @@ def make_runtime(config: Config, video: Path) -> Runtime:
         "stem": video.stem,
         "work_dir": str(config.work_dir),
         "config_dir": str(config.path.parent),
+        "script_dir": str(script_dir),
     }
     return Runtime(video=video, config=config, builtins=builtins)
 
@@ -421,6 +429,17 @@ def resolve_step_paths(
 
     ctx["outputs"] = outputs
     return inputs, outputs, vars_ctx, ctx
+
+
+def resolve_step_cwd(
+    step: Step,
+    ctx: Dict[str, Dict[str, Any]],
+    runtime: Runtime,
+) -> Path:
+    if step.cwd_template is None:
+        return runtime.config.work_dir
+    value = substitute(step.cwd_template, ctx, step.name)
+    return resolve_path(value, runtime.config.work_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -507,7 +526,7 @@ def _command_record(program: str, argv: List[str], cwd: Path, status: str, **ext
     return record
 
 
-def run_capture(step: Step, prepared: PreparedCommand, runtime: Runtime) -> None:
+def run_capture(step: Step, prepared: PreparedCommand, runtime: Runtime, cwd: Path) -> None:
     cdef = prepared.definition
     assert cdef.capture is not None
     try:
@@ -521,7 +540,7 @@ def run_capture(step: Step, prepared: PreparedCommand, runtime: Runtime) -> None
     try:
         completed = subprocess.run(
             argv,
-            cwd=str(runtime.config.work_dir),
+            cwd=str(cwd),
             stdout=subprocess.PIPE,
             stderr=None,
             text=True,
@@ -559,7 +578,7 @@ def run_capture(step: Step, prepared: PreparedCommand, runtime: Runtime) -> None
     prepared.result = _command_record(
         program,
         argv,
-        runtime.config.work_dir,
+        cwd,
         status,
         returncode=completed.returncode,
         duration_sec=round(duration, 3),
@@ -572,6 +591,7 @@ def build_commands(
     step: Step,
     ctx: Dict[str, Dict[str, Any]],
     runtime: Runtime,
+    cwd: Path,
 ) -> List[PreparedCommand]:
     prepared_commands: List[PreparedCommand] = []
     for cdef in step.commands:
@@ -579,7 +599,7 @@ def build_commands(
         args = [substitute(arg, ctx, step.name) for arg in cdef.args]
         prepared = PreparedCommand(definition=cdef, hash_argv=[program, *args])
         if cdef.capture is not None:
-            run_capture(step, prepared, runtime)
+            run_capture(step, prepared, runtime, cwd)
             assert prepared.value is not None
             ctx["vars"][cdef.capture] = prepared.value
         prepared_commands.append(prepared)
@@ -621,6 +641,7 @@ def compute_hash(
     outputs: Dict[str, str],
     prepared: List[PreparedCommand],
     captured: Dict[str, str],
+    cwd: Path,
 ) -> str:
     payload = {
         "step": step.name,
@@ -631,6 +652,8 @@ def compute_hash(
         "captured": captured,
         "variables": step.variables,
     }
+    if step.cwd_template is not None:
+        payload["cwd"] = str(cwd)
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -821,12 +844,15 @@ def process_step(
     print(f"\n=== {title} ===", flush=True)
 
     inputs, outputs, _vars_ctx, ctx = resolve_step_paths(step, runtime, previous_outputs)
+    cwd = resolve_step_cwd(step, ctx, runtime)
     for name, path in inputs.items():
         print(f"  вход  {name}: {path}")
     for name, path in outputs.items():
         print(f"  выход {name}: {path}")
+    if cwd != runtime.config.work_dir:
+        print(f"  папка запуска: {cwd}")
 
-    prepared = build_commands(step, ctx, runtime)
+    prepared = build_commands(step, ctx, runtime, cwd)
     captured = {
         command.definition.capture: command.value
         for command in prepared
@@ -843,7 +869,7 @@ def process_step(
                 f"шаг '{step.name}': не найдены входные файлы: " + ", ".join(missing_inputs)
             )
     else:
-        hash_value = compute_hash(step, runtime, inputs, outputs, prepared, captured)
+        hash_value = compute_hash(step, runtime, inputs, outputs, prepared, captured, cwd)
 
     outputs_ok = bool(outputs) and all(os.path.isfile(path) for path in outputs.values())
     latest = state.latest(step.name)
@@ -899,7 +925,7 @@ def process_step(
             state.append(
                 make_record(
                     "adopted",
-                    commands=command_records(prepared, runtime.config.work_dir),
+                    commands=command_records(prepared, cwd),
                     hash_outputs=True,
                 )
             )
@@ -931,7 +957,7 @@ def process_step(
         state.append(
             make_record(
                 "failed",
-                commands=command_records(prepared, runtime.config.work_dir),
+                commands=command_records(prepared, cwd),
                 error=str(exc),
             )
         )
@@ -945,7 +971,7 @@ def process_step(
         state.append(
             make_record(
                 "failed",
-                commands=command_records(prepared, runtime.config.work_dir),
+                commands=command_records(prepared, cwd),
                 error=str(exc),
             )
         )
@@ -954,7 +980,7 @@ def process_step(
     state.append(
         make_record(
             "running",
-            commands=command_records(prepared, runtime.config.work_dir, pending_status="pending"),
+            commands=command_records(prepared, cwd, pending_status="pending"),
         )
     )
 
@@ -962,14 +988,14 @@ def process_step(
     for command in prepared:
         if command.definition.capture is not None:
             continue
-        result = run_main(command, runtime.config.work_dir)
+        result = run_main(command, cwd)
         command.result = result
         if result["status"] != "success":
             duration = time.monotonic() - started
             state.append(
                 make_record(
                     "failed",
-                    commands=command_records(prepared, runtime.config.work_dir),
+                    commands=command_records(prepared, cwd),
                     duration=duration,
                     error=f"команда завершилась с кодом {result.get('returncode')}",
                 )
@@ -984,7 +1010,7 @@ def process_step(
         state.append(
             make_record(
                 "failed",
-                commands=command_records(prepared, runtime.config.work_dir),
+                commands=command_records(prepared, cwd),
                 duration=duration,
                 error="не созданы выходные файлы: " + ", ".join(missing_outputs),
             )
@@ -996,7 +1022,7 @@ def process_step(
     state.append(
         make_record(
             "success",
-            commands=command_records(prepared, runtime.config.work_dir),
+            commands=command_records(prepared, cwd),
             duration=duration,
             hash_outputs=True,
         )
