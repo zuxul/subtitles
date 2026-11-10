@@ -60,6 +60,7 @@ class Step:
     outputs: Dict[str, str]
     variables: Dict[str, Any]
     commands: List[CommandDef]
+    stop_after: bool = False
 
 
 @dataclass
@@ -283,6 +284,10 @@ def load_config(path: Path) -> Config:
         if not isinstance(description, str):
             raise PipelineError(f"шаг '{name}': 'description' должен быть строкой")
 
+        stop_after = step_raw.get("stop_after", False)
+        if not isinstance(stop_after, bool):
+            raise PipelineError(f"шаг '{name}': 'stop_after' должен быть true или false")
+
         inputs = _parse_name_map(step_raw.get("inputs"), "inputs", name)
         outputs = _parse_name_map(step_raw.get("outputs"), "outputs", name)
         step_variables = _parse_variables(step_raw.get("variables"), f"шаг '{name}'")
@@ -323,6 +328,7 @@ def load_config(path: Path) -> Config:
                 outputs=outputs,
                 variables=step_variables,
                 commands=commands,
+                stop_after=stop_after,
             )
         )
 
@@ -1085,6 +1091,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         counters = {"run": 0, "skip": 0, "adopt": 0}
         previous_outputs: Dict[str, Dict[str, str]] = {}
+        stopped_at: Optional[str] = None
 
         for step in config.steps:
             force = (
@@ -1102,6 +1109,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             previous_outputs[step.name] = outputs
             counters[action] += 1
+            if step.stop_after:
+                stopped_at = step.name
+                print(f"  Остановка после шага '{step.name}' (stop_after)")
+                break
 
         print()
         if args.dry_run:
@@ -1113,6 +1124,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(
                 f"Готово: выполнено {counters['run']}, "
                 f"пропущено {counters['skip']}, принято {counters['adopt']}."
+            )
+        if stopped_at is not None:
+            print(
+                f"Остановлено после шага '{stopped_at}' по маркеру stop_after; "
+                "последующие шаги не выполнялись."
             )
         return 0
     except PipelineError as exc:
