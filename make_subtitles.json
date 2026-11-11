@@ -2,7 +2,7 @@
   "work_dir": ".",
   "state_file": "{stem}.pipeline.json",
   "variables": {
-    "python": "python3"
+    "python": "{script_dir}/cut/.venv~/bin/python"
   },
   "steps": [
     {
@@ -26,27 +26,80 @@
       ]
     },
     {
-      "name": "whisper",
-      "description": "Распознать греческую речь",
-      "program": "/Users/ivansh/projects/whisper.cpp/build-release/bin/whisper-cli",
+      "name": "vad",
+      "description": "Вырезать участки с речью (Silero VAD) и построить карту таймкодов",
+      "program": "{vars.python}",
+      "cwd": "{script_dir}",
       "inputs": {
         "wav": "@audio.wav"
       },
       "outputs": {
-        "srt": "{work_dir}/{stem}.srt"
+        "wav": "{work_dir}/{stem}_vad.wav",
+        "map": "{work_dir}/{stem}_vad_map.json"
+      },
+      "args": [
+        "{script_dir}/vad.py",
+        "{inputs.wav}",
+        "-o", "{outputs.wav}",
+        "-j", "{outputs.map}",
+        "--speech-pad-ms", "1000"
+      ]
+    },
+    {
+      "name": "separator",
+      "description": "Делим аудио на музыку и речь",
+      "program": "{vars.python}",
+      "cwd": "{script_dir}",
+      "inputs": {
+        "wav": "@vad.wav"
+      },
+      "outputs": {
+        "wav": "{work_dir}/{stem}_speech.wav"
+      },
+      "args": [
+        "{script_dir}/separator_speech.py",
+        "{inputs.wav}",
+        "{outputs.wav}"
+      ]
+    },
+    {
+      "name": "whisper",
+      "description": "Распознать греческую речь",
+      "program": "/Users/ivansh/projects/whisper.cpp/build-release/bin/whisper-cli",
+      "inputs": {
+        "wav": "@separator.wav"
+      },
+      "outputs": {
+        "srt": "{work_dir}/{stem}_vad.srt"
       },
       "args": [
         "-m", "/Users/ivansh/projects/models/ggml-large-v3.bin",
         "-f", "{inputs.wav}",
         "-l", "el",
         "-osrt",
-        "-of", "{work_dir}/{stem}",
+        "-of", "{work_dir}/{stem}_vad",
         "-pp",
         "-t", "1",
-        "--vad",
-        "--vad-threshold", "0.45",
-        "-vm", "/Users/ivansh/projects/models/ggml-silero-v5.1.2.bin",
         "-bs", "5"
+      ]
+    },
+    {
+      "name": "unmap",
+      "description": "Пересчитать таймкоды SRT из VAD-шкалы в исходную",
+      "program": "{vars.python}",
+      "cwd": "{script_dir}",
+      "inputs": {
+        "srt": "@whisper.srt",
+        "map": "@vad.map"
+      },
+      "outputs": {
+        "srt": "{work_dir}/{stem}.srt"
+      },
+      "args": [
+        "{script_dir}/vad_unmap.py",
+        "{inputs.srt}",
+        "{inputs.map}",
+        "-o", "{outputs.srt}"
       ]
     },
     {
@@ -55,7 +108,7 @@
       "program": "{vars.python}",
       "cwd": "{script_dir}",
       "inputs": {
-        "srt": "@whisper.srt"
+        "srt": "@unmap.srt"
       },
       "outputs": {
         "ru_srt": "{work_dir}/{stem}_ru.srt"
@@ -72,7 +125,7 @@
       "description": "Собрать двуязычный ASS",
       "inputs": {
         "video": "{video}",
-        "srt": "@whisper.srt",
+        "srt": "@unmap.srt",
         "ru_srt": "@translate.ru_srt"
       },
       "outputs": {

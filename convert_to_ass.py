@@ -23,7 +23,7 @@ def read_srt_file(path: Path):
     blocks = re.split(r'\n\s*\n(?=\d+\n)', content.strip() + '\n')
     for block in blocks:
         lines = [line.strip() for line in block.split('\n') if line.strip()]
-        result[lines[1]] = lines[2]
+        result[lines[1]] = " ".join(lines[2:])
     return result
 
 
