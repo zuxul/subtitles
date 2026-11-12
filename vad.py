@@ -4,7 +4,7 @@ from math import gcd
 from pathlib import Path
 import torch
 import soundfile as sf
-from silero_vad import load_silero_vad, get_speech_timestamps
+from silero_vad import load_silero_vad, get_speech_timestamps_from_probs
 
 
 def load_audio_mono(path: str, sampling_rate: int = 16000) -> torch.Tensor:
@@ -29,14 +29,82 @@ def load_audio_mono(path: str, sampling_rate: int = 16000) -> torch.Tensor:
     return wav
 
 
+def get_speech_probs(
+    wav: torch.Tensor,
+    model,
+    sampling_rate: int,
+    state_reset_sec: float,
+    threshold: float,
+):
+    """Считает вероятности речи по кадрам, периодически сбрасывая состояние модели.
+
+    Silero VAD хранит рекуррентное состояние между кадрами. На длинной музыке оно
+    «залипает», и модель перестаёт замечать речь поверх музыки. Периодический
+    reset_states() возвращает чувствительность. Сброс выполняется только в
+    неречевых кадрах, чтобы не разрывать слова.
+
+    Возвращает (probs, vad_sampling_rate, step).
+    """
+    if sampling_rate > 16000 and sampling_rate % 16000 == 0:
+        step = sampling_rate // 16000
+        vad_sampling_rate = 16000
+        audio = wav[::step]
+    else:
+        step = 1
+        vad_sampling_rate = sampling_rate
+        audio = wav
+
+    window_size_samples = 512 if vad_sampling_rate == 16000 else 256
+    total_samples = len(audio)
+
+    if state_reset_sec and state_reset_sec > 0:
+        reset_samples = int(state_reset_sec * vad_sampling_rate)
+        # Выравниваем границы сброса по размеру кадра
+        reset_samples = max(
+            window_size_samples,
+            (reset_samples // window_size_samples) * window_size_samples,
+        )
+    else:
+        reset_samples = max(window_size_samples, total_samples)
+
+    speech_probs = []
+    non_speech_samples = 0
+
+    model.reset_states()
+    with torch.no_grad():
+        for start in range(0, total_samples, window_size_samples):
+            chunk = audio[start:start + window_size_samples]
+            if len(chunk) < window_size_samples:
+                chunk = torch.nn.functional.pad(
+                    chunk, (0, window_size_samples - len(chunk))
+                )
+            prob = model(chunk, vad_sampling_rate).item()
+            speech_probs.append(prob)
+
+            # Сбрасываем состояние только внутри длинного неречевого участка
+            # (музыка, шум), чтобы не разрывать слова и не терять контекст
+            if state_reset_sec and state_reset_sec > 0:
+                if prob >= threshold:
+                    non_speech_samples = 0
+                else:
+                    non_speech_samples += window_size_samples
+                    if non_speech_samples >= reset_samples:
+                        model.reset_states()
+                        non_speech_samples = 0
+
+    return speech_probs, vad_sampling_rate, step
+
+
 def extract_speech_with_map(
     input_audio_path: str,
     output_audio_path: str,
     output_json_path: str,
-    gap_sec: float = 0.3,
-    sampling_rate: int = 16000,
-    min_silence_duration_ms: int = 300,
-    speech_pad_ms: int = 100
+    gap_sec: float,
+    sampling_rate: int,
+    min_silence_duration_ms: int,
+    speech_pad_ms: int,
+    threshold: float,
+    state_reset_sec: float,
 ):
     # 1. Загрузка модели Silero VAD
     model = load_silero_vad()
@@ -45,13 +113,18 @@ def extract_speech_with_map(
     wav = load_audio_mono(input_audio_path, sampling_rate=sampling_rate)
 
     # 3. Поиск участков с речью (возвращает таймкоды в сэмплах)
-    speech_timestamps = get_speech_timestamps(
-        wav,
-        model,
-        sampling_rate=sampling_rate,
+    speech_probs, vad_sampling_rate, step = get_speech_probs(
+        wav, model, sampling_rate, state_reset_sec, threshold
+    )
+    speech_timestamps = get_speech_timestamps_from_probs(
+        speech_probs,
+        sampling_rate=vad_sampling_rate,
         min_silence_duration_ms=min_silence_duration_ms,
         speech_pad_ms=speech_pad_ms,
-        return_seconds=False
+        threshold=threshold,
+        return_seconds=False,
+        audio_length_samples=len(wav) // step,
+        step=step,
     )
 
     if not speech_timestamps:
@@ -140,6 +213,12 @@ def parse_args():
                         help="Минимальная длительность тишины в мс (по умолчанию 400)")
     parser.add_argument("--speech-pad-ms", type=int, default=100,
                         help="Отступ вокруг речи в мс (по умолчанию 100)")
+    parser.add_argument("--threshold", type=float, default=0.5,
+                        help="Порог вероятности речи для VAD (по умолчанию 0.5)")
+    parser.add_argument("--state-reset-sec", type=float, default=15.0,
+                        help="Сбрасывать состояние Silero VAD после N секунд "
+                             "непрерывной неречи (музыки/шума), 0 — отключить "
+                             "(по умолчанию 15)")
     return parser.parse_args()
 
 
@@ -157,4 +236,6 @@ if __name__ == "__main__":
         sampling_rate=args.sampling_rate,
         min_silence_duration_ms=args.min_silence_ms,
         speech_pad_ms=args.speech_pad_ms,
+        threshold=args.threshold,
+        state_reset_sec=args.state_reset_sec,
     )

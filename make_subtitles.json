@@ -42,7 +42,8 @@
         "{inputs.wav}",
         "-o", "{outputs.wav}",
         "-j", "{outputs.map}",
-        "--speech-pad-ms", "1000"
+        "--state-reset-sec", "10",
+        "--gap-sec", "1"
       ]
     },
     {
